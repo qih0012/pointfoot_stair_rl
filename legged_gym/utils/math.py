@@ -28,10 +28,10 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
-import torch
-from torch import Tensor
 import numpy as np
 from isaacgym.torch_utils import quat_apply, normalize
+import torch
+from torch import Tensor
 from typing import Tuple
 
 

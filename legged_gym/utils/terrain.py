@@ -113,7 +113,7 @@ class Terrain:
             terrain = terrain_utils.SubTerrain(
                 "terrain",
                 width=self.width_per_env_pixels,
-                length=self.width_per_env_pixels,
+                length=self.length_per_env_pixels,
                 vertical_scale=self.vertical_scale,
                 horizontal_scale=self.horizontal_scale,
             )
@@ -125,7 +125,7 @@ class Terrain:
         terrain = terrain_utils.SubTerrain(
             "terrain",
             width=self.width_per_env_pixels,
-            length=self.width_per_env_pixels,
+            length=self.length_per_env_pixels,
             vertical_scale=self.cfg.vertical_scale,
             horizontal_scale=self.cfg.horizontal_scale,
         )
@@ -172,13 +172,13 @@ class Terrain:
                 step_slope *= -1
                 step_width = (
                     default_step_width
-                    * step_scale[int((self.terrain_num[2] - 1) / self.cfg.num_rows)]
+                    * step_scale[min(int((self.terrain_num[2] - 1) / self.cfg.num_rows), len(step_scale) - 1)]
                 )
             else:
                 self.terrain_num[3] += 1
                 step_width = (
                     default_step_width
-                    * step_scale[int((self.terrain_num[3] - 1) / self.cfg.num_rows)]
+                    * step_scale[min(int((self.terrain_num[3] - 1) / self.cfg.num_rows), len(step_scale) - 1)]
                 )
             terrain_utils.pyramid_stairs_terrain(
                 terrain,

@@ -9,6 +9,9 @@ legged_gym.egg-info/requires.txt
 legged_gym.egg-info/top_level.txt
 legged_gym/envs/__init__.py
 legged_gym/envs/vec_env.py
+legged_gym/envs/pointfoot_stairs/__init__.py
+legged_gym/envs/pointfoot_stairs/pointfoot_stairs.py
+legged_gym/envs/pointfoot_stairs/pointfoot_stairs_config.py
 legged_gym/utils/__init__.py
 legged_gym/utils/helpers.py
 legged_gym/utils/logger.py

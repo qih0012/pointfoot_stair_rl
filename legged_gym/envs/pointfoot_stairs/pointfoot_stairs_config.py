@@ -79,7 +79,7 @@ class BipedCfgStairs(BaseConfig):
         selected = False  # select a unique terrain type and pass all arguments
         terrain_kwargs = None  # Dict of arguments for selected terrain
         max_init_terrain_level = 0  # 从简单楼梯开始
-        terrain_length = 12.0  # 增加地形长度
+        terrain_length = 8.0  # 保持与 width 一致以避免维度问题
         terrain_width = 8.0
         num_rows = 10  # number of terrain rows (levels)
         num_cols = 20  # number of terrain cols (types)
@@ -109,39 +109,63 @@ class BipedCfgStairs(BaseConfig):
             ang_vel_yaw = [-2.0, 2.0]  # min max [rad/s]
             heading = [-3.14, 3.14]
 
+    class gait:
+        num_gait_params = 4
+        resampling_time = 5  # time before command are changed[s]
+
+        class ranges:
+            frequencies = [1.5, 2.5]
+            offsets = [0, 1]  # offset is hard to learn
+            # durations = [0.3, 0.8]  # small durations(<0.4) is hard to learn
+            # frequencies = [2, 2]
+            # offsets = [0.5, 0.5]
+            durations = [0.5, 0.5]
+            swing_height = [0.0, 0.1]
+
     class init_state:
         pos = [0.0, 0.0, 1.0]  # x,y,z [m]
         rot = [0.0, 0.0, 0.0, 1.0]  # x,y,z,w [quat]
         lin_vel = [0.0, 0.0, 0.0]  # x,y,z [m/s]
         ang_vel = [0.0, 0.0, 0.0]  # x,y,z [rad/s]
         default_joint_angles = {  # target angles when action = 0.0
-            "abad_L": 0.0,
-            "abad_R": 0.0,
-            "hip_L": 0.0,
-            "hip_R": 0.0,
-            "knee_L": 0.0,
-            "knee_R": 0.0,
-        }
-
-        # target angles when action = 0.0
-        default_joint_angles = {  # = target angles [rad] when action = 0.0
-            "abad_L": 0.0,
-            "abad_R": 0.0,
-            "hip_L": 0.0,
-            "hip_R": 0.0,
-            "knee_L": 0.0,
-            "knee_R": 0.0,
+            "abad_L_Joint": 0.0,
+            "hip_L_Joint": 0.0,
+            "knee_L_Joint": 0.0,
+            "foot_L_Joint": 0.0,
+            "abad_R_Joint": 0.0,
+            "hip_R_Joint": 0.0,
+            "knee_R_Joint": 0.0,
+            "foot_R_Joint": 0.0,
         }
 
     class control:
         control_type = "P"  # P: position, V: velocity, T: torques
         # PD Drive parameters:
-        stiffness = {"abad_L": 100.0, "abad_R": 100.0, "hip_L": 100.0, "hip_R": 100.0, "knee_L": 100.0, "knee_R": 100.0}  # [N*m/rad]
-        damping = {"abad_L": 3.0, "abad_R": 3.0, "hip_L": 3.0, "hip_R": 3.0, "knee_L": 3.0, "knee_R": 3.0}  # [N*m*s/rad]
+        stiffness = {
+            "abad_L_Joint": 100.0,
+            "hip_L_Joint": 100.0,
+            "knee_L_Joint": 100.0,
+            "foot_L_Joint": 0.0,
+            "abad_R_Joint": 100.0,
+            "hip_R_Joint": 100.0,
+            "knee_R_Joint": 100.0,
+            "foot_R_Joint": 0.0,
+        }  # [N*m/rad]
+        damping = {
+            "abad_L_Joint": 3.0,
+            "hip_L_Joint": 3.0,
+            "knee_L_Joint": 3.0,
+            "foot_L_Joint": 0.0,
+            "abad_R_Joint": 3.0,
+            "hip_R_Joint": 3.0,
+            "knee_R_Joint": 3.0,
+            "foot_R_Joint": 0.0,
+        }  # [N*m*s/rad]
         # action scale: target angle = actionScale * action + defaultAngle
         action_scale = 0.25
         # decimation: Number of control action updates @ sim DT per policy DT
         decimation = 4
+        user_torque_limit = 33.5  # limits torque range
 
     class asset:
         file = "{LEGGED_GYM_ROOT_DIR}/resources/robots/" + robot_type + "/urdf/robot.urdf"
@@ -168,14 +192,33 @@ class BipedCfgStairs(BaseConfig):
     class domain_rand:
         randomize_friction = True
         friction_range = [0.5, 1.25]
+        randomize_restitution = True
+        restitution_range = [0.0, 1.0]
         randomize_base_mass = False
         added_mass_range = [-1.0, 1.0]
+        randomize_base_com = True
+        rand_com_vec = [0.03, 0.02, 0.03]
+        randomize_inertia = True
+        randomize_inertia_range = [0.8, 1.2]
         push_robots = True
         push_interval_s = 15
         max_push_vel_xy = 1.0
-        randomize_gains = False
-        added_kp_range = [-0.0, 0.0]
-        added_kd_range = [-0.0, 0.0]
+        rand_force = False
+        force_resampling_time_s = 15
+        max_force = 50.0
+        rand_force_curriculum_level = 0
+        randomize_Kp = True
+        randomize_Kp_range = [0.8, 1.2]
+        randomize_Kd = True
+        randomize_Kd_range = [0.8, 1.2]
+        randomize_motor_torque = True
+        randomize_motor_torque_range = [0.8, 1.2]
+        randomize_default_dof_pos = True
+        randomize_default_dof_pos_range = [-0.05, 0.05]
+        randomize_action_delay = True
+        randomize_imu_offset = True
+        randomize_imu_offset_range = [-1.2, 1.2]
+        delay_ms_range = [0, 20]
 
     class rewards:
         class scales:
@@ -250,19 +293,19 @@ class BipedCfgStairs(BaseConfig):
             friction_offset_threshold = 0.001  # [m]
             friction_correlation_distance = 0.005  # [m]
             num_gauss_seidel_iterations = 4
-            default_buffer_size_multiplier = 5.0
-            max_gpu_contact_pairs = 8 * 1024 * 1024  # 8M contact pairs
-            num_position_iterations = 4
-            num_velocity_iterations = 0
-            contact_offset = 0.01  # [m]
-            rest_offset = 0.0  # [m]
-            bounce_threshold_velocity = 0.5  # [m/s]
-            max_depenetration_velocity = 1.0
-            friction_offset_threshold = 0.001  # [m]
-            friction_correlation_distance = 0.005  # [m]
-            num_gauss_seidel_iterations = 4
-            default_buffer_size_multiplier = 5.0
-            max_gpu_contact_pairs = 8 * 1024 * 1024  # 8M contact pairs
+
+    class noise:
+        add_noise = True
+        noise_level = 1.5  # scales other values
+
+        class noise_scales:
+            dof_pos = 0.01
+            dof_vel = 1.5
+            lin_vel = 0.1
+            ang_vel = 0.2
+            gravity = 0.05
+            height_measurements = 0.1
+            imu = 0.1
 
     class viewer:
         ref_env = 0
@@ -274,6 +317,10 @@ class BipedCfgPPOStairs(BaseConfig):
     seed = 1
 
     class runner:
+        encoder_class_name = "MLP_Encoder"
+        policy_class_name = "ActorCritic"
+        algorithm_class_name = "PPO"
+        num_steps_per_env = 24  # per iteration
         experiment_name = "pointfoot_stairs"
         run_name = ""
         max_iterations = 1500  # number of policy updates
@@ -290,6 +337,21 @@ class BipedCfgPPOStairs(BaseConfig):
         wandb_job_type = "train"
         exptid = ""
 
+    class MLP_Encoder:
+        output_detach = True
+        num_input_dim = BipedCfgStairs.env.num_observations * BipedCfgStairs.env.obs_history_length
+        num_output_dim = 3
+        hidden_dims = [256, 128]
+        activation = "elu"
+        orthogonal_init = False
+
+    class policy:
+        init_noise_std = 1.0
+        actor_hidden_dims = [512, 256, 128]
+        critic_hidden_dims = [512, 256, 128]
+        activation = "elu"  # can be elu, relu, selu, crelu, lrelu, tanh, sigmoid
+        orthogonal_init = False
+
     class algorithm:
         # algorithm
         value_loss_coef = 1.0
@@ -304,6 +366,11 @@ class BipedCfgPPOStairs(BaseConfig):
         lam = 0.95
         desired_kl = 0.01
         max_grad_norm = 1.0
+        
+        # Extra training params
+        est_learning_rate = 1.0e-3
+        ts_learning_rate = 1.0e-4
+        critic_take_latent = True
 
     class policy:
         init_noise_std = 1.0

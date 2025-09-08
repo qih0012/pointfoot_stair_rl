@@ -1,10 +1,10 @@
-import torch
 import numpy as np
 import os
 import math
 
 from isaacgym.torch_utils import *
 from isaacgym import gymtorch, gymapi, gymutil
+import torch
 
 from legged_gym import LEGGED_GYM_ROOT_DIR, envs
 from legged_gym.envs.base.base_task import BaseTask
@@ -237,8 +237,52 @@ class BipedStairs(BaseTask):
 
     def reset_idx(self, env_ids):
         """Reset specific environments"""
-        super().reset_idx(env_ids)
-        
+        if len(env_ids) == 0:
+            return
+            
+        # update curriculum
+        if self.cfg.terrain.curriculum:
+            self._update_terrain_curriculum(env_ids)
+        # avoid updating command curriculum at each step since the maximum command is common to all envs
+        if self.cfg.commands.curriculum:
+            time_out_env_ids = self.time_out_buf.nonzero(as_tuple=False).flatten()
+            self.update_command_curriculum(time_out_env_ids)
+
+        # reset robot states
+        self._reset_dofs(env_ids)
+        self._reset_root_states(env_ids)
+
+        # reset buffers
+        self.last_actions[env_ids] = 0.0
+        self.last_dof_pos[env_ids] = self.dof_pos[env_ids]
+        self.last_base_position[env_ids] = self.base_position[env_ids]
+        self.last_foot_positions[env_ids] = self.foot_positions[env_ids]
+        self.last_dof_vel[env_ids] = 0.0
+        self.feet_air_time[env_ids] = 0.0
+        self.episode_length_buf[env_ids] = 0
+        self.envs_steps_buf[env_ids] = 0
+        self.reset_buf[env_ids] = 1
+        self.obs_history[env_ids] = 0
+        self.obs_history[env_ids] = self.obs_buf[env_ids].repeat(1, self.obs_history_length)
+        self.gait_indices[env_ids] = 0
+        self.fail_buf[env_ids] = 0
+        self.action_fifo[env_ids] = 0
+        self.dof_pos_int[env_ids] = 0
+        # fill extras
+        self.extras["episode"] = {}
+        for key in self.episode_sums.keys():
+            self.extras["episode"]['rew_' + key] = torch.mean(self.episode_sums[key][env_ids]) / self.max_episode_length_s
+            self.episode_sums[key][env_ids] = 0.0
+        self.extras["episode"]["terrain_level"] = torch.mean(self.terrain_levels.float())
+        # log additional curriculum info
+        if self.cfg.terrain.curriculum:
+            self.extras["episode"]["max_terrain_level"] = torch.max(self.terrain_levels.float())
+        if self.cfg.commands.curriculum:
+            self.extras["episode"]["max_command_x"] = self.command_ranges["lin_vel_x"][1]
+        # send timeout info to the algorithm
+        if self.cfg.env.send_timeouts:
+            self.extras["time_outs"] = self.time_out_buf
+            
         # 重置楼梯相关状态
         self.initial_height[env_ids] = self.root_states[env_ids, 2] - self.env_origins[env_ids, 2]
         self.initial_pos_x[env_ids] = self.root_states[env_ids, 0] - self.env_origins[env_ids, 0]
@@ -288,7 +332,7 @@ class BipedStairs(BaseTask):
         """能效奖励 - 惩罚过度的动作"""
         return -torch.norm(self.torques, dim=1)
 
-    def _reward_lin_vel_z_stairs(self):
+    def _reward_lin_vel_z(self):
         """修改的垂直速度奖励 - 在楼梯上时允许适当的垂直速度"""
         lin_vel_z = self.base_lin_vel[:, 2]
         
@@ -310,3 +354,81 @@ class BipedStairs(BaseTask):
         ground_penalty = -torch.abs(lin_vel_z)
         
         return on_stairs_mask * stairs_penalty + (1 - on_stairs_mask) * ground_penalty
+
+    def _get_noise_scale_vec(self, cfg):
+        """Sets a vector used to scale the noise added to the observations.
+            [NOTE]: Must be adapted when changing the observations structure
+
+        Args:
+            cfg (Dict): Environment config file
+
+        Returns:
+            [torch.Tensor]: Vector of scales used to multiply a uniform distribution in [-1, 1]
+        """
+        noise_vec = torch.zeros_like(self.obs_buf[0])
+        self.add_noise = self.cfg.noise.add_noise
+        noise_scales = self.cfg.noise.noise_scales
+        noise_level = self.cfg.noise.noise_level
+        noise_vec[:3] = noise_scales.lin_vel * noise_level * self.obs_scales.lin_vel
+        noise_vec[3:6] = noise_scales.ang_vel * noise_level * self.obs_scales.ang_vel
+        noise_vec[6:9] = noise_scales.gravity * noise_level
+        noise_vec[9:12] = 0.0  # commands
+        noise_vec[12:24] = noise_scales.dof_pos * noise_level * self.obs_scales.dof_pos
+        noise_vec[24:36] = noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel
+        noise_vec[36:72] = 0.0  # previous actions
+        if self.cfg.env.num_observations == 187:
+            noise_vec[72:75] = noise_scales.lin_vel * noise_level * self.obs_scales.lin_vel # command
+            noise_vec[75:110] = 0.0 # heights
+            noise_vec[110:187] = noise_scales.imu * noise_level * 1 # imu history
+        elif self.cfg.env.num_observations == 35:  # 楼梯特定观察
+            noise_vec[30:33] = noise_scales.lin_vel * noise_level * self.obs_scales.lin_vel
+            noise_vec[33:35] = 0.05 * noise_level  # 楼梯相关观察的噪声
+        return noise_vec
+
+    # 基础奖励函数
+    def _reward_termination(self):
+        # 终止奖励
+        return torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
+
+    def _reward_tracking_lin_vel(self):
+        # 跟踪线性速度命令 (xy轴)
+        lin_vel_error = torch.sum(
+            torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1
+        )
+        return torch.exp(-lin_vel_error / 0.25)
+
+    def _reward_tracking_ang_vel(self):
+        # 跟踪角速度命令 (yaw轴)
+        ang_vel_error = torch.square(self.commands[:, 2] - self.base_ang_vel[:, 2])
+        return torch.exp(-ang_vel_error / 0.25)
+
+    def _reward_ang_vel_xy(self):
+        # 惩罚xy轴基础角速度
+        return torch.sum(torch.square(self.base_ang_vel[:, :2]), dim=1)
+
+    def _reward_orientation(self):
+        # 惩罚非平坦的基础方向
+        return torch.sum(torch.square(self.projected_gravity[:, :2]), dim=1)
+
+    def _reward_base_height(self):
+        # 惩罚基础高度偏离目标
+        base_height = torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1)
+        return torch.square(base_height - 0.8)  # 目标高度0.8m
+
+    def _reward_joint_acc(self):
+        # 惩罚关节加速度
+        return torch.sum(torch.square(self.dof_acc), dim=1)
+
+    def _reward_action_rate(self):
+        # 惩罚动作变化
+        return torch.sum(torch.square(self.actions - self.last_actions[:, :, 0]), dim=1)
+
+    def _reward_power(self):
+        # 惩罚功率消耗
+        return torch.sum(torch.square(self.torques), dim=1)
+
+    def _reward_collision(self):
+        # 惩罚碰撞
+        return torch.sum(
+            torch.norm(self.contact_forces[:, self.penalised_contact_indices, :], dim=-1) > 1.0, dim=1
+        )

@@ -28,10 +28,10 @@
 #
 # Copyright (c) 2021 ETH Zurich, Nikita Rudin
 
-import torch
-from torch import Tensor
 from isaacgym.torch_utils import *
 from isaacgym import gymtorch, gymapi, gymutil
+import torch
+from torch import Tensor
 
 from legged_gym import LEGGED_GYM_ROOT_DIR, envs
 from legged_gym.envs.base.base_task import BaseTask
