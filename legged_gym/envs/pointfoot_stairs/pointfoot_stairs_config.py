@@ -37,10 +37,10 @@ robot_type = os.getenv("ROBOT_TYPE")
 class BipedCfgStairs(BaseConfig):
     class env:
         num_envs = 8192
-        num_observations = 35  # 增加楼梯相关观察
+        num_observations = 47  # 完全匹配网络期望的维度
         num_critic_observations = 3 + num_observations
         num_height_samples = 117
-        num_actions = 6
+        num_actions = 6  # 6个可动关节：abad_L, hip_L, knee_L, abad_R, hip_R, knee_R
         env_spacing = 3.0  # not used with heightfields/trimeshes
         send_timeouts = True  # send time out information to the algorithm
         episode_length_s = 30  # 增加episode长度以完成爬楼梯
@@ -123,56 +123,51 @@ class BipedCfgStairs(BaseConfig):
             swing_height = [0.0, 0.1]
 
     class init_state:
-        pos = [0.0, 0.0, 1.0]  # x,y,z [m]
+        pos = [0.0, 0.0, 0.8]  # x,y,z [m] 参考原始配置的高度
         rot = [0.0, 0.0, 0.0, 1.0]  # x,y,z,w [quat]
         lin_vel = [0.0, 0.0, 0.0]  # x,y,z [m/s]
         ang_vel = [0.0, 0.0, 0.0]  # x,y,z [rad/s]
-        default_joint_angles = {  # target angles when action = 0.0
-            "abad_L_Joint": 0.0,
-            "hip_L_Joint": 0.0,
-            "knee_L_Joint": 0.0,
-            "foot_L_Joint": 0.0,
-            "abad_R_Joint": 0.0,
-            "hip_R_Joint": 0.0,
-            "knee_R_Joint": 0.0,
-            "foot_R_Joint": 0.0,
+        default_joint_angles = {  # target angles when action = 0.0 - 直立姿态
+            "abad_L_Joint": 0.0,      # 左侧髋关节外展
+            "hip_L_Joint": 0.0,       # 左侧髋关节
+            "knee_L_Joint": 0.0,      # 左侧膝关节
+            "abad_R_Joint": 0.0,      # 右侧髋关节外展
+            "hip_R_Joint": 0.0,       # 右侧髋关节
+            "knee_R_Joint": 0.0,      # 右侧膝关节
         }
 
     class control:
+        action_scale = 0.25
         control_type = "P"  # P: position, V: velocity, T: torques
-        # PD Drive parameters:
+        # PD Drive parameters - 参考原始配置
         stiffness = {
-            "abad_L_Joint": 100.0,
-            "hip_L_Joint": 100.0,
-            "knee_L_Joint": 100.0,
-            "foot_L_Joint": 0.0,
-            "abad_R_Joint": 100.0,
-            "hip_R_Joint": 100.0,
-            "knee_R_Joint": 100.0,
-            "foot_R_Joint": 0.0,
+            "abad_L_Joint": 42,       # 左侧髋关节外展刚度
+            "hip_L_Joint": 42,        # 左侧髋关节刚度
+            "knee_L_Joint": 42,       # 左侧膝关节刚度
+            "abad_R_Joint": 42,       # 右侧髋关节外展刚度
+            "hip_R_Joint": 42,        # 右侧髋关节刚度
+            "knee_R_Joint": 42,       # 右侧膝关节刚度
         }  # [N*m/rad]
         damping = {
-            "abad_L_Joint": 3.0,
-            "hip_L_Joint": 3.0,
-            "knee_L_Joint": 3.0,
-            "foot_L_Joint": 0.0,
-            "abad_R_Joint": 3.0,
-            "hip_R_Joint": 3.0,
-            "knee_R_Joint": 3.0,
-            "foot_R_Joint": 0.0,
+            "abad_L_Joint": 2.5,      # 左侧髋关节外展阻尼
+            "hip_L_Joint": 2.5,       # 左侧髋关节阻尼
+            "knee_L_Joint": 2.5,      # 左侧膝关节阻尼
+            "abad_R_Joint": 2.5,      # 右侧髋关节外展阻尼
+            "hip_R_Joint": 2.5,       # 右侧髋关节阻尼
+            "knee_R_Joint": 2.5,      # 右侧膝关节阻尼
         }  # [N*m*s/rad]
-        # action scale: target angle = actionScale * action + defaultAngle
-        action_scale = 0.25
         # decimation: Number of control action updates @ sim DT per policy DT
         decimation = 4
         user_torque_limit = 33.5  # limits torque range
+        max_power = 1000.0  # [W]
 
     class asset:
-        file = "{LEGGED_GYM_ROOT_DIR}/resources/robots/" + robot_type + "/urdf/robot.urdf"
+        file = "{}/resources/robots/{}/urdf/robot.urdf".format(LEGGED_GYM_ROOT_DIR, robot_type)
         name = "biped"
-        foot_name = "foot"
-        penalize_contacts_on = ["thigh", "shin"]
-        terminate_after_contacts_on = ["base"]
+        foot_name = "foot"  # 会匹配 foot_L_Link, foot_R_Link
+        foot_radius = 0.032  # 根据URDF中sphere radius="0.032"
+        penalize_contacts_on = ["hip_L_Link", "hip_R_Link", "knee_L_Link", "knee_R_Link"]  # 根据URDF链接名称
+        terminate_after_contacts_on = ["base_Link"]
         disable_gravity = False
         collapse_fixed_joints = True  # merge bodies connected by fixed joints. Specific fixed joints can be kept by adding " <... dont_collapse="true">
         fix_base_link = False  # fix the base of the robot
@@ -244,12 +239,23 @@ class BipedCfgStairs(BaseConfig):
         only_positive_rewards = (
             True  # if true negative total rewards are clipped at zero (avoids early termination problems)
         )
+        clip_reward = 100
+        clip_single_reward = 5
         tracking_sigma = 0.25  # tracking reward = exp(-error^2/sigma)
+        ang_tracking_sigma = 0.25  # tracking reward = exp(-error^2/sigma)
+        height_tracking_sigma = 0.01
         soft_dof_pos_limit = 1.0  # percentage of urdf limits, values above this limit are penalized
         soft_dof_vel_limit = 1.0
         soft_torque_limit = 1.0
         base_height_target = 1.0
+        feet_height_target = 0.10
+        min_feet_distance = 0.115
+        about_landing_threshold = 0.08
         max_contact_force = 100.0  # forces above this value are penalized
+        kappa_gait_probs = 0.05
+        gait_force_sigma = 25.0
+        gait_vel_sigma = 0.25
+        gait_height_sigma = 0.005
 
     class normalization:
         class obs_scales:
@@ -257,10 +263,12 @@ class BipedCfgStairs(BaseConfig):
             ang_vel = 0.25
             dof_pos = 1.0
             dof_vel = 0.05
+            dof_acc = 0.0025
             height_measurements = 5.0
+            contact_forces = 0.01
+            torque = 0.05
             # 楼梯相关观察缩放
             stair_height = 2.0
-            contact_forces = 0.01
 
         clip_observations = 100.0
         clip_actions = 100.0

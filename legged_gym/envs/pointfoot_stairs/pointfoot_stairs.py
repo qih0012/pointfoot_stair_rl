@@ -142,54 +142,59 @@ class BipedStairs(BaseTask):
         self.commands[:, 2] = torch_rand_float(
             self.command_ranges["heading"][0],
             self.command_ranges["heading"][1],
-            (self.num_envs,),
+            (self.num_envs, 1),
             device=self.device,
         ).squeeze(1)
 
-        # 基础观察 
+        # 基础观察：只包含6个可动关节
         obs = torch.cat(
             (
-                self.base_lin_vel * self.obs_scales.lin_vel,
-                self.base_ang_vel * self.obs_scales.ang_vel,
-                self.projected_gravity,
-                self.commands[:, :3] * self.commands_scale,
-                (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,
-                self.dof_vel * self.obs_scales.dof_vel,
-                self.actions,
+                self.base_lin_vel * self.obs_scales.lin_vel,           # 3维
+                self.base_ang_vel * self.obs_scales.ang_vel,           # 3维
+                self.projected_gravity,                                # 3维
+                self.commands[:, :3] * self.commands_scale,            # 3维
+                (self.dof_pos - self.default_dof_pos) * self.obs_scales.dof_pos,  # 6维
+                self.dof_vel * self.obs_scales.dof_vel,                # 6维
+                self.actions,                                          # 6维
             ),
             dim=-1,
-        )
+        )  # 总计30维
 
-        # 添加楼梯特定观察
-        stairs_obs = self._get_stairs_observations()
-        obs = torch.cat((obs, stairs_obs), dim=-1)
+        # 添加楼梯特定观察 (5维)
+        stairs_obs = self._get_stairs_observations()  # 5维
+        obs = torch.cat((obs, stairs_obs), dim=-1)     # 30 + 5 = 35维
+        
+        # 填充到47维以匹配网络期望
+        current_dim = obs.shape[1]
+        target_dim = 47
+        if current_dim < target_dim:
+            padding = torch.zeros(obs.shape[0], target_dim - current_dim, device=obs.device)
+            obs = torch.cat((obs, padding), dim=-1)
 
-        if self.cfg.terrain.measure_heights:
-            heights = (
-                torch.clip(
-                    self.root_states[:, 2].unsqueeze(1) - 0.5 - self.measured_heights,
-                    -1,
-                    1.0,
-                )
-                * self.obs_scales.height_measurements
-            )
-            obs = torch.cat((obs, heights), dim=-1)
+        # 为了匹配网络维度，暂时移除高度测量
+        # if self.cfg.terrain.measure_heights:
+        #     heights = (
+        #         torch.clip(
+        #             self.root_states[:, 2].unsqueeze(1) - 0.5 - self.measured_heights,
+        #             -1,
+        #             1.0,
+        #         )
+        #         * self.obs_scales.height_measurements
+        #     )
+        #     obs = torch.cat((obs, heights), dim=-1)
 
         # 观察历史
         self.obs_buf = obs
-        if self.obs_history_length > 1:
-            self.obs_history = torch.cat(
-                [self.obs_buf.unsqueeze(1), self.obs_history[:, :-1]], dim=1
-            ).flatten(1)
+        # 不处理观察历史，让基类处理
 
         # Critic observations (包含特权信息)
         if self.cfg.env.num_critic_observations is not None:
             critic_obs = torch.cat(
                 (
                     obs,
-                    self.contact_forces[:, self.feet_indices, 2].flatten(dim=1)
+                    self.contact_forces[:, self.feet_indices, 2].flatten(start_dim=1)
                     * self.obs_scales.contact_forces,
-                    self.rigid_body_states[:, self.base_idx, 2:3]
+                    self.root_states[:, 2:3]
                     - self.env_origins[:, 2:3],
                 ),
                 dim=1,
@@ -432,3 +437,74 @@ class BipedStairs(BaseTask):
         return torch.sum(
             torch.norm(self.contact_forces[:, self.penalised_contact_indices, :], dim=-1) > 1.0, dim=1
         )
+
+    def _compute_torques(self, actions):
+        """Compute torques from actions.
+            Actions can be interpreted as position or velocity targets given to a PD controller, or directly as scaled torques.
+            [NOTE]: torques must have the same dimension as the number of DOFs, even if some DOFs are not actuated.
+
+        Args:
+            actions (torch.Tensor): Actions
+
+        Returns:
+            [torch.Tensor]: Torques sent to the simulation
+        """
+        # pd controller
+        actions_scaled = actions * self.cfg.control.action_scale
+
+        control_type = self.cfg.control.control_type
+        if control_type == "P":
+            torques = (
+                self.p_gains * (actions_scaled + self.default_dof_pos - self.dof_pos)
+                - self.d_gains * self.dof_vel
+            )
+        elif control_type == "V":
+            torques = (
+                self.p_gains * (actions_scaled - self.dof_vel)
+                - self.d_gains * (self.dof_vel - self.last_dof_vel) / self.sim_params.dt
+            )
+        elif control_type == "T":
+            torques = actions_scaled
+        else:
+            raise NameError(f"Unknown controller type: {control_type}")
+        return torch.clip(
+            torques * self.torques_scale, -self.torque_limits, self.torque_limits
+        )
+
+    def _resample_commands(self, env_ids):
+        """Randomly select commands of some environments
+
+        Args:
+            env_ids (List[int]): Environments ids for which new commands are needed
+        """
+        self.commands[env_ids, 0] = (
+            self.command_ranges["lin_vel_x"][env_ids, 1]
+            - self.command_ranges["lin_vel_x"][env_ids, 0]
+        ) * torch.rand(len(env_ids), device=self.device) + self.command_ranges[
+            "lin_vel_x"
+        ][
+            env_ids, 0
+        ]
+        self.commands[env_ids, 1] = (
+            self.command_ranges["lin_vel_y"][env_ids, 1]
+            - self.command_ranges["lin_vel_y"][env_ids, 0]
+        ) * torch.rand(len(env_ids), device=self.device) + self.command_ranges[
+            "lin_vel_y"
+        ][
+            env_ids, 0
+        ]
+        self.commands[env_ids, 2] = (
+            self.command_ranges["ang_vel_yaw"][env_ids, 1]
+            - self.command_ranges["ang_vel_yaw"][env_ids, 0]
+        ) * torch.rand(len(env_ids), device=self.device) + self.command_ranges[
+            "ang_vel_yaw"
+        ][
+            env_ids, 0
+        ]
+        if self.cfg.commands.heading_command:
+            self.commands[env_ids, 3] = torch_rand_float(
+                self.command_ranges["heading"][0],
+                self.command_ranges["heading"][1],
+                (len(env_ids), 1),
+                device=self.device,
+            ).squeeze(1)
