@@ -164,24 +164,17 @@ class BipedStairs(BaseTask):
         stairs_obs = self._get_stairs_observations()  # 5维
         obs = torch.cat((obs, stairs_obs), dim=-1)     # 30 + 5 = 35维
         
-        # 填充到47维以匹配网络期望
-        current_dim = obs.shape[1]
-        target_dim = 47
-        if current_dim < target_dim:
-            padding = torch.zeros(obs.shape[0], target_dim - current_dim, device=obs.device)
-            obs = torch.cat((obs, padding), dim=-1)
-
         # 为了匹配网络维度，暂时移除高度测量
-        # if self.cfg.terrain.measure_heights:
-        #     heights = (
-        #         torch.clip(
-        #             self.root_states[:, 2].unsqueeze(1) - 0.5 - self.measured_heights,
-        #             -1,
-        #             1.0,
-        #         )
-        #         * self.obs_scales.height_measurements
-        #     )
-        #     obs = torch.cat((obs, heights), dim=-1)
+        if self.cfg.terrain.measure_heights:
+            heights = (
+                torch.clip(
+                    self.root_states[:, 2].unsqueeze(1) - 0.5 - self.measured_heights,
+                    -1,
+                    1.0,
+                )
+                * self.obs_scales.height_measurements
+            )
+            obs = torch.cat((obs, heights), dim=-1)
 
         # 观察历史
         self.obs_buf = obs

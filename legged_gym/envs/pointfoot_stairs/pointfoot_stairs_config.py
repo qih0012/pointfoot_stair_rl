@@ -37,7 +37,7 @@ robot_type = os.getenv("ROBOT_TYPE")
 class BipedCfgStairs(BaseConfig):
     class env:
         num_envs = 8192
-        num_observations = 47  # 完全匹配网络期望的维度
+        num_observations = 152
         num_critic_observations = 3 + num_observations
         num_height_samples = 117
         num_actions = 6  # 6个可动关节：abad_L, hip_L, knee_L, abad_R, hip_R, knee_R
@@ -223,8 +223,8 @@ class BipedCfgStairs(BaseConfig):
             tracking_ang_vel = 0.5
             lin_vel_z = -2.0
             ang_vel_xy = -0.05
-            orientation = -0.0
-            base_height = -0.0
+            orientation = -10.0
+            base_height = -2.0
             joint_acc = -0.0001
             action_rate = -0.01
             power = -0.0001
