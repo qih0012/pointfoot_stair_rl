@@ -50,6 +50,11 @@ class BipedStairs(BaseTask):
         if not self.headless:
             self.set_camera(self.cfg.viewer.pos, self.cfg.viewer.lookat)
         self._init_buffers()
+        
+        # 初始化feet相关的缓冲区（在feet_indices定义之后）
+        self.last_contacts = torch.zeros(self.num_envs, len(self.feet_indices), dtype=torch.bool, device=self.device, requires_grad=False)
+        self.feet_air_time = torch.zeros(self.num_envs, self.feet_indices.shape[0], dtype=torch.float, device=self.device, requires_grad=False)
+        
         self._prepare_reward_function()
         self.init_done = True
 
@@ -67,6 +72,8 @@ class BipedStairs(BaseTask):
         # 前进距离跟踪
         self.initial_pos_x = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
         self.forward_progress = torch.zeros(self.num_envs, device=self.device, dtype=torch.float)
+        
+        # 为奖励函数添加必要的缓冲区 (将在_init_buffers中初始化feet相关缓冲区)
 
     def step(self, actions):
         """Apply actions, simulate, call self.post_physics_step()
@@ -288,15 +295,129 @@ class BipedStairs(BaseTask):
         self.forward_progress[env_ids] = 0.0
         self.stair_contact_buf[env_ids] = 0.0
         self.on_stairs[env_ids] = False
+        self.last_contacts[env_ids] = False
+        self.feet_air_time[env_ids] = 0.0
 
-    # ======== 爬楼梯特定奖励函数 ========
+    #------------ 标准基础奖励函数 ----------------
+    def _reward_lin_vel_z(self):
+        # 惩罚z轴基础线性速度 - 在楼梯上时允许适当的垂直速度
+        lin_vel_z = self.base_lin_vel[:, 2]
+        
+        # 在楼梯上时，允许适当的向上速度
+        on_stairs_mask = self.on_stairs.float()
+        
+        # 在楼梯上：惩罚过快的垂直速度，但允许适当的向上运动
+        stairs_penalty = torch.where(
+            torch.abs(lin_vel_z) > 0.5,  # 垂直速度过快
+            torch.square(lin_vel_z),
+            torch.zeros_like(lin_vel_z)  # 适当的垂直速度
+        )
+        
+        # 在平地上：惩罚所有垂直运动
+        ground_penalty = torch.square(lin_vel_z)
+        
+        return on_stairs_mask * stairs_penalty + (1 - on_stairs_mask) * ground_penalty
+    
+    def _reward_ang_vel_xy(self):
+        # 惩罚xy轴基础角速度
+        return torch.sum(torch.square(self.base_ang_vel[:, :2]), dim=1)
+    
+    def _reward_orientation(self):
+        # 惩罚非平坦的基础方向
+        return torch.sum(torch.square(self.projected_gravity[:, :2]), dim=1)
+
+    def _reward_base_height(self):
+        # 惩罚基础高度偏离目标
+        base_height = torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1)
+        return torch.square(base_height - self.cfg.rewards.base_height_target)
+
+    def _reward_torques(self):
+        # 惩罚力矩
+        return torch.sum(torch.square(self.torques), dim=1)
+
+    def _reward_dof_vel(self):
+        # 惩罚关节速度
+        return torch.sum(torch.square(self.dof_vel), dim=1)
+    
+    def _reward_dof_acc(self):
+        # 惩罚关节加速度
+        return torch.sum(torch.square((self.last_dof_vel - self.dof_vel) / self.dt), dim=1)
+    
+    def _reward_action_rate(self):
+        # 惩罚动作变化
+        return torch.sum(torch.square(self.last_actions[:, :, 0] - self.actions), dim=1)
+    
+    def _reward_collision(self):
+        # 惩罚碰撞
+        return torch.sum(1.*(torch.norm(self.contact_forces[:, self.penalised_contact_indices, :], dim=-1) > 0.1), dim=1)
+    
+    def _reward_termination(self):
+        # 终止奖励
+        return self.reset_buf * ~self.time_out_buf
+
+    def _reward_dof_pos_limits(self):
+        # 惩罚关节位置接近极限
+        out_of_limits = -(self.dof_pos - self.dof_pos_limits[:, 0]).clip(max=0.) # lower limit
+        out_of_limits += (self.dof_pos - self.dof_pos_limits[:, 1]).clip(min=0.)
+        return torch.sum(out_of_limits, dim=1)
+
+    def _reward_dof_vel_limits(self):
+        # 惩罚关节速度接近极限
+        return torch.sum((torch.abs(self.dof_vel) - self.dof_vel_limits*self.cfg.rewards.soft_dof_vel_limit).clip(min=0., max=1.), dim=1)
+
+    def _reward_torque_limits(self):
+        # 惩罚力矩接近极限
+        return torch.sum((torch.abs(self.torques) - self.torque_limits*self.cfg.rewards.soft_torque_limit).clip(min=0.), dim=1)
+
+    def _reward_tracking_lin_vel(self):
+        # 跟踪线性速度命令 (xy轴)
+        lin_vel_error = torch.sum(torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1)
+        return torch.exp(-lin_vel_error/self.cfg.rewards.tracking_sigma)
+
+    def _reward_tracking_ang_vel(self):
+        # 跟踪角速度命令 (yaw轴)
+        ang_vel_error = torch.square(self.commands[:, 2] - self.base_ang_vel[:, 2])
+        return torch.exp(-ang_vel_error/self.cfg.rewards.tracking_sigma)
+
+    def _reward_feet_air_time(self):
+        # 奖励长步幅
+        contact = self.contact_forces[:, self.feet_indices, 2] > 1.
+        contact_filt = torch.logical_or(contact, self.last_contacts) 
+        self.last_contacts = contact
+        first_contact = (self.feet_air_time > 0.) * contact_filt
+        self.feet_air_time += self.dt
+        rew_airTime = torch.sum((self.feet_air_time - 0.5) * first_contact, dim=1) # reward only on first contact with the ground
+        rew_airTime *= torch.norm(self.commands[:, :2], dim=1) > 0.1 #no reward for zero command
+        self.feet_air_time *= ~contact_filt
+        return rew_airTime
+    
+    def _reward_stumble(self):
+        # 惩罚足部撞击垂直表面
+        return torch.any(torch.norm(self.contact_forces[:, self.feet_indices, :2], dim=2) >\
+             5 *torch.abs(self.contact_forces[:, self.feet_indices, 2]), dim=1)
+        
+    def _reward_stand_still(self):
+        # 在零命令时惩罚运动
+        return torch.sum(torch.abs(self.dof_pos - self.default_dof_pos), dim=1) * (torch.norm(self.commands[:, :2], dim=1) < 0.1)
+
+    def _reward_feet_contact_forces(self):
+        # 惩罚高接触力
+        return torch.sum((torch.norm(self.contact_forces[:, self.feet_indices, :], dim=-1) -  self.cfg.rewards.max_contact_force).clip(min=0.), dim=1)
+
+    #------------ 双足机器人特定奖励函数 ----------------
+    def _reward_no_fly(self):
+        # 防止双脚同时离地 (参考Cassie)
+        contacts = self.contact_forces[:, self.feet_indices, 2] > 0.1
+        single_contact = torch.sum(1.*contacts, dim=1)==1
+        return 1.*single_contact
+
+    #------------ 爬楼梯特定奖励函数 ----------------
     def _reward_height_progress(self):
-        """奖励高度进展"""
-        return self.height_progress
+        # 奖励高度进展
+        return torch.clamp(self.height_progress, 0.0, 2.0)  # 限制最大奖励
 
     def _reward_stair_contact(self):
-        """奖励楼梯接触"""
-        # 当足部正确接触楼梯时给予奖励
+        # 奖励楼梯接触
         contact_reward = torch.zeros(self.num_envs, device=self.device)
         
         # 双脚都接触时给予更高奖励
@@ -308,50 +429,17 @@ class BipedStairs(BaseTask):
         
         return contact_reward
 
-    def _reward_balance_on_stairs(self):
-        """奖励在楼梯上保持平衡"""
-        # 基于角速度和姿态稳定性
-        ang_vel_penalty = torch.norm(self.base_ang_vel, dim=1)
-        orientation_penalty = torch.norm(self.projected_gravity[:, :2], dim=1)
-        
-        balance_reward = torch.exp(-2 * (ang_vel_penalty + orientation_penalty))
-        
-        # 只在楼梯上时应用平衡奖励
-        balance_reward = balance_reward * self.on_stairs.float()
-        
-        return balance_reward
-
     def _reward_forward_progress(self):
-        """奖励前进进展"""
-        # 鼓励在爬楼梯的同时前进
-        return torch.clamp(self.forward_progress, 0.0, 5.0)  # 限制最大奖励
+        # 奖励前进进展
+        return torch.clamp(self.forward_progress, 0.0, 3.0)  # 限制最大奖励
 
-    def _reward_energy_efficiency(self):
-        """能效奖励 - 惩罚过度的动作"""
-        return -torch.norm(self.torques, dim=1)
-
-    def _reward_lin_vel_z(self):
-        """修改的垂直速度奖励 - 在楼梯上时允许适当的垂直速度"""
-        lin_vel_z = self.base_lin_vel[:, 2]
-        
-        # 在楼梯上时，允许适当的向上速度
-        on_stairs_mask = self.on_stairs.float()
-        
-        # 在楼梯上：惩罚过快的垂直速度，但允许适当的向上运动
-        stairs_penalty = torch.where(
-            lin_vel_z > 0.5,  # 向上速度过快
-            -lin_vel_z,
-            torch.where(
-                lin_vel_z < -0.5,  # 向下速度过快
-                lin_vel_z,
-                0.0  # 适当的垂直速度
-            )
-        )
-        
-        # 在平地上：惩罚所有垂直运动
-        ground_penalty = -torch.abs(lin_vel_z)
-        
-        return on_stairs_mask * stairs_penalty + (1 - on_stairs_mask) * ground_penalty
+    def _reward_stair_climbing_efficiency(self):
+        # 爬楼梯效率：结合高度和前进进展
+        height_component = torch.clamp(self.height_progress, 0.0, 1.0)
+        forward_component = torch.clamp(self.forward_progress, 0.0, 1.0)
+        # 只有在楼梯上时才给奖励
+        efficiency = (height_component + forward_component) * 0.5 * self.on_stairs.float()
+        return efficiency
 
     def _get_noise_scale_vec(self, cfg):
         """Sets a vector used to scale the noise added to the observations.
@@ -367,69 +455,27 @@ class BipedStairs(BaseTask):
         self.add_noise = self.cfg.noise.add_noise
         noise_scales = self.cfg.noise.noise_scales
         noise_level = self.cfg.noise.noise_level
-        noise_vec[:3] = noise_scales.lin_vel * noise_level * self.obs_scales.lin_vel
-        noise_vec[3:6] = noise_scales.ang_vel * noise_level * self.obs_scales.ang_vel
-        noise_vec[6:9] = noise_scales.gravity * noise_level
-        noise_vec[9:12] = 0.0  # commands
-        noise_vec[12:24] = noise_scales.dof_pos * noise_level * self.obs_scales.dof_pos
-        noise_vec[24:36] = noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel
-        noise_vec[36:72] = 0.0  # previous actions
-        if self.cfg.env.num_observations == 187:
-            noise_vec[72:75] = noise_scales.lin_vel * noise_level * self.obs_scales.lin_vel # command
-            noise_vec[75:110] = 0.0 # heights
-            noise_vec[110:187] = noise_scales.imu * noise_level * 1 # imu history
-        elif self.cfg.env.num_observations == 35:  # 楼梯特定观察
-            noise_vec[30:33] = noise_scales.lin_vel * noise_level * self.obs_scales.lin_vel
-            noise_vec[33:35] = 0.05 * noise_level  # 楼梯相关观察的噪声
+        
+        # 基础观察噪声 (30维)
+        noise_vec[:3] = noise_scales.lin_vel * noise_level * self.obs_scales.lin_vel      # base lin vel
+        noise_vec[3:6] = noise_scales.ang_vel * noise_level * self.obs_scales.ang_vel    # base ang vel
+        noise_vec[6:9] = noise_scales.gravity * noise_level                              # projected gravity
+        noise_vec[9:12] = 0.0                                                            # commands
+        noise_vec[12:18] = noise_scales.dof_pos * noise_level * self.obs_scales.dof_pos # dof pos (6 joints)
+        noise_vec[18:24] = noise_scales.dof_vel * noise_level * self.obs_scales.dof_vel # dof vel (6 joints)
+        noise_vec[24:30] = 0.0                                                           # actions (6 joints)
+        
+        # 楼梯特定观察噪声 (5维)
+        noise_vec[30:35] = 0.05 * noise_level                                            # stairs observations
+        
+        # 高度测量噪声 (如果启用)
+        if self.cfg.terrain.measure_heights:
+            height_start = 35
+            height_end = height_start + len(self.cfg.terrain.measured_points_x) * len(self.cfg.terrain.measured_points_y)
+            noise_vec[height_start:height_end] = noise_scales.height_measurements * noise_level * self.obs_scales.height_measurements
+        
         return noise_vec
 
-    # 基础奖励函数
-    def _reward_termination(self):
-        # 终止奖励
-        return torch.zeros(self.num_envs, dtype=torch.float, device=self.device, requires_grad=False)
-
-    def _reward_tracking_lin_vel(self):
-        # 跟踪线性速度命令 (xy轴)
-        lin_vel_error = torch.sum(
-            torch.square(self.commands[:, :2] - self.base_lin_vel[:, :2]), dim=1
-        )
-        return torch.exp(-lin_vel_error / 0.25)
-
-    def _reward_tracking_ang_vel(self):
-        # 跟踪角速度命令 (yaw轴)
-        ang_vel_error = torch.square(self.commands[:, 2] - self.base_ang_vel[:, 2])
-        return torch.exp(-ang_vel_error / 0.25)
-
-    def _reward_ang_vel_xy(self):
-        # 惩罚xy轴基础角速度
-        return torch.sum(torch.square(self.base_ang_vel[:, :2]), dim=1)
-
-    def _reward_orientation(self):
-        # 惩罚非平坦的基础方向
-        return torch.sum(torch.square(self.projected_gravity[:, :2]), dim=1)
-
-    def _reward_base_height(self):
-        # 惩罚基础高度偏离目标
-        base_height = torch.mean(self.root_states[:, 2].unsqueeze(1) - self.measured_heights, dim=1)
-        return torch.square(base_height - 0.8)  # 目标高度0.8m
-
-    def _reward_joint_acc(self):
-        # 惩罚关节加速度
-        return torch.sum(torch.square(self.dof_acc), dim=1)
-
-    def _reward_action_rate(self):
-        # 惩罚动作变化
-        return torch.sum(torch.square(self.actions - self.last_actions[:, :, 0]), dim=1)
-
-    def _reward_power(self):
-        # 惩罚功率消耗
-        return torch.sum(torch.square(self.torques), dim=1)
-
-    def _reward_collision(self):
-        # 惩罚碰撞
-        return torch.sum(
-            torch.norm(self.contact_forces[:, self.penalised_contact_indices, :], dim=-1) > 1.0, dim=1
-        )
 
     def _compute_torques(self, actions):
         """Compute torques from actions.

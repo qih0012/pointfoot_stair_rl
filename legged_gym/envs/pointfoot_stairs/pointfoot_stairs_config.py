@@ -217,28 +217,39 @@ class BipedCfgStairs(BaseConfig):
 
     class rewards:
         class scales:
-            # 基础奖励
-            termination = -0.0
+            # 基础运动奖励 (参考base和cassie的设计)
+            termination = -200.0
             tracking_lin_vel = 1.0
             tracking_ang_vel = 0.5
             lin_vel_z = -2.0
             ang_vel_xy = -0.05
-            orientation = -10.0
-            base_height = -2.0
-            joint_acc = -0.0001
+            orientation = -0.2
+            base_height = -0.5
+            torques = -0.00001
+            dof_vel = -0.0
+            dof_acc = -2.5e-7
             action_rate = -0.01
-            power = -0.0001
             collision = -1.0
+            dof_pos_limits = -10.0
+            dof_vel_limits = -1.0
+            torque_limits = -0.1
+            
+            # 步态和接触奖励
+            feet_air_time = 1.0
+            stumble = -0.0
+            stand_still = -0.0
+            feet_contact_forces = -0.01
+            
+            # 双足机器人特定奖励 (参考Cassie)
+            no_fly = 0.25
+            
             # 爬楼梯特定奖励
-            height_progress = 2.0  # 高度进展奖励
-            stair_contact = 0.5    # 楼梯接触奖励
-            balance_on_stairs = 1.0  # 楼梯平衡奖励
-            forward_progress = 1.5  # 前进进展奖励
-            energy_efficiency = -0.001  # 能效奖励
+            height_progress = 2.0
+            stair_contact = 1.0
+            forward_progress = 1.5
+            stair_climbing_efficiency = 1.0
 
-        only_positive_rewards = (
-            True  # if true negative total rewards are clipped at zero (avoids early termination problems)
-        )
+        only_positive_rewards = False
         clip_reward = 100
         clip_single_reward = 5
         tracking_sigma = 0.25  # tracking reward = exp(-error^2/sigma)
@@ -247,7 +258,7 @@ class BipedCfgStairs(BaseConfig):
         soft_dof_pos_limit = 1.0  # percentage of urdf limits, values above this limit are penalized
         soft_dof_vel_limit = 1.0
         soft_torque_limit = 1.0
-        base_height_target = 1.0
+        base_height_target = 0.8  # 与初始高度匹配，更容易学习站立
         feet_height_target = 0.10
         min_feet_distance = 0.115
         about_landing_threshold = 0.08
@@ -331,7 +342,7 @@ class BipedCfgPPOStairs(BaseConfig):
         num_steps_per_env = 24  # per iteration
         experiment_name = "pointfoot_stairs"
         run_name = ""
-        max_iterations = 1500  # number of policy updates
+        max_iterations = 10000  # number of policy updates
         save_interval = 50  # check for potential saves every this many iterations
         resume = False
         load_run = -1  # -1 = last run
